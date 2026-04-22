@@ -13,12 +13,14 @@ function fmtFecha(raw) {
   if (!raw) return "—";
   try {
     const d = new Date(raw);
-    const dia = DIAS[d.getDay()];
-    const dd  = String(d.getDate()).padStart(2, "0");
-    const mm  = String(d.getMonth() + 1).padStart(2, "0");
-    const yyyy = d.getFullYear();
-    const hh  = String(d.getHours()).padStart(2, "0");
-    const min = String(d.getMinutes()).padStart(2, "0");
+    // Convertir a hora de Honduras (UTC-6)
+    const hn = new Date(d.toLocaleString("en-US", { timeZone: "America/Tegucigalpa" }));
+    const dia = DIAS[hn.getDay()];
+    const dd  = String(hn.getDate()).padStart(2, "0");
+    const mm  = String(hn.getMonth() + 1).padStart(2, "0");
+    const yyyy = hn.getFullYear();
+    const hh  = String(hn.getHours()).padStart(2, "0");
+    const min = String(hn.getMinutes()).padStart(2, "0");
     return `${dia} ${dd}/${mm}/${yyyy}  ${hh}:${min}`;
   } catch { return raw; }
 }
