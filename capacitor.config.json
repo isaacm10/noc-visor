@@ -1,0 +1,15 @@
+{
+  "appId": "com.multicable.nocvisor",
+  "appName": "NOC Visor",
+  "webDir": "dist",
+  "android": {
+    "allowMixedContent": true
+  },
+  "plugins": {
+    "LocalNotifications": {
+      "smallIcon": "ic_launcher",
+      "iconColor": "#FF3D3D",
+      "sound": "default"
+    }
+  }
+}
