@@ -1,7 +1,7 @@
 @echo off
 echo.
 echo ========================================
-echo   NOC VISOR - Actualizando proyecto...
+echo   NOC VISOR - Actualizando Todo...
 echo ========================================
 echo.
 
@@ -23,8 +23,8 @@ call npx cap open android
 echo.
 echo ========================================
 echo   Listo! Genera el APK en Android Studio:
-echo   Build ^> Generate App Bundles or APKs
-echo            ^> Generate APKs
+echo   Build > Generate App Bundles or APKs
+echo            > Generate APKs
 echo ========================================
 echo.
 pause

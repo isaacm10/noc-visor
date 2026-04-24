@@ -6,6 +6,13 @@ const SUPABASE_URL = "https://uazaihdhpderwqmhglni.supabase.co";
 const SUPABASE_KEY = "sb_publishable_e9ERp7L3Z2JVGFXe5XwE1w_lpxqjX82";
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
+// ─── Superadmins protegidos (hardcoded) ───────────────────────────────────────
+const SUPERADMIN_EMAILS = [
+  "isaacdelcidmendoza772@gmail.com",
+  "henry.aguilar@multicable.hn",
+  "joad.mejia@multicable.hn",
+];
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 const DIAS = ["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"];
 
@@ -13,15 +20,15 @@ function fmtFecha(raw) {
   if (!raw) return "—";
   try {
     const d = new Date(raw);
-    // Convertir a hora de Honduras (UTC-6)
-    const hn = new Date(d.toLocaleString("en-US", { timeZone: "America/Tegucigalpa" }));
-    const dia = DIAS[hn.getDay()];
-    const dd  = String(hn.getDate()).padStart(2, "0");
-    const mm  = String(hn.getMonth() + 1).padStart(2, "0");
-    const yyyy = hn.getFullYear();
-    const hh  = String(hn.getHours()).padStart(2, "0");
-    const min = String(hn.getMinutes()).padStart(2, "0");
-    return `${dia} ${dd}/${mm}/${yyyy}  ${hh}:${min}`;
+    const dia = DIAS[d.getUTCDay()];
+    const dd  = String(d.getUTCDate()).padStart(2, "0");
+    const mm  = String(d.getUTCMonth() + 1).padStart(2, "0");
+    const yyyy = d.getUTCFullYear();
+    const hh  = d.getUTCHours();
+    const min = String(d.getUTCMinutes()).padStart(2, "0");
+    const ampm = hh >= 12 ? "pm" : "am";
+    const hh12 = hh % 12 || 12;
+    return `${dia} ${dd}/${mm}/${yyyy}  ${hh12}:${min} ${ampm}`;
   } catch { return raw; }
 }
 
@@ -248,7 +255,10 @@ const authCard = {
 
 // ─── AUTH PAGES (Login / Registro / Verificar OTP) ───────────────────────────
 function LoginPage({ onLogin }) {
-  const [page, setPage] = useState("login"); // "login" | "register" | "verify"
+  const [page, setPage] = useState("login"); // "login" | "register" | "verify" | "pending"
+  const [pendingNombre, setPendingNombre] = useState("");
+  // Flag para bloquear el SIGNED_IN automático durante verificación OTP
+  const blockAutoLogin = useRef(false);
 
   // Estado compartido
   const [email, setEmail]       = useState("");
@@ -274,7 +284,20 @@ function LoginPage({ onLogin }) {
       const { data, error } = await supabase.auth.signInWithPassword({ email, password: pass });
       if (error) throw error;
       const { data: uData } = await supabase.from("usuarios").select("rol").eq("id", data.user.id).single();
-      onLogin(data.user, data.session, uData?.rol || "lectura");
+      
+      // Bloquear usuarios pendientes → pantalla de espera
+      if (!uData || uData.rol === "pendiente") {
+        await supabase.auth.signOut();
+        setPendingNombre(uData?.nombre || data.user.email?.split("@")[0] || "");
+        setPage("pending");
+        return;
+      }
+      
+      // Detectar superadmin por email
+      const rolFinal = SUPERADMIN_EMAILS.includes(data.user.email)
+        ? "superadmin"
+        : (uData?.rol || "lectura");
+      onLogin(data.user, data.session, rolFinal);
     } catch (e) {
       const msg = e.message || "";
       if (msg.includes("Email not confirmed")) {
@@ -292,6 +315,13 @@ function LoginPage({ onLogin }) {
     if (!nombre || !email || !pass) { setErr("Completa todos los campos."); return; }
     if (pass !== pass2)             { setErr("Las contraseñas no coinciden."); return; }
     if (pass.length < 6)            { setErr("Mínimo 6 caracteres."); return; }
+
+    // ── Validar dominio @multicable.hn ────────────────────────────────────────
+    if (!email.toLowerCase().endsWith("@multicable.hn")) {
+      setErr("Solo se permiten correos @multicable.hn para registrarse.");
+      return;
+    }
+
     setLoading(true); reset();
     try {
       const { data, error } = await supabase.auth.signUp({
@@ -301,6 +331,17 @@ function LoginPage({ onLogin }) {
       if (error) throw error;
       const identities = data.user?.identities || [];
       if (identities.length === 0) { setErr("Este correo ya está registrado."); setLoading(false); return; }
+
+      // ── Insertar como pendiente de aprobación ─────────────────────────────
+      // Primero insertar (por si no existe)
+      await supabase.from("usuarios").upsert({
+        id: data.user.id, nombre, email,
+        rol: "pendiente", creado_en: new Date().toISOString()
+      }, { onConflict: "id" });
+      // Forzar rol pendiente aunque un trigger lo haya creado con otro rol
+      await supabase.from("usuarios").update({ rol: "pendiente", nombre, email })
+        .eq("id", data.user.id);
+
       setOk("Código enviado a tu correo. Ingrésalo abajo.");
       setPage("verify");
     } catch (e) {
@@ -313,25 +354,39 @@ function LoginPage({ onLogin }) {
     e.preventDefault();
     if (!otp || otp.length < 6) { setErr("Ingresa el código de 6 dígitos."); return; }
     setLoading(true); reset();
+    blockAutoLogin.current = true; // bloquear auto-login durante OTP
     let lastErr = "";
     for (const tipo of ["email", "signup"]) {
       try {
         const { data, error } = await supabase.auth.verifyOtp({ email: pendingEmail, token: otp, type: tipo });
         if (error) { lastErr = error.message; continue; }
         if (data?.user) {
-          // Insertar en tabla usuarios
-          try {
-            await supabase.from("usuarios").insert({
-              id: data.user.id, nombre, email: pendingEmail,
-              rol: "lectura", creado_en: new Date().toISOString()
-            });
-          } catch (_) {}
-          const { data: uData } = await supabase.from("usuarios").select("rol").eq("id", data.user.id).single();
-          onLogin(data.user, data.session, uData?.rol || "lectura");
+          // Forzar rol pendiente después del OTP (trigger pudo haberlo cambiado)
+          await supabase.from("usuarios").update({ rol: "pendiente" })
+            .eq("id", data.user.id).eq("rol", "lectura"); // solo si está en lectura (creado por trigger)
+          
+          // Leer rol actual
+          const { data: uData } = await supabase.from("usuarios").select("rol, nombre").eq("id", data.user.id).single();
+          
+          if (!uData || uData.rol === "pendiente") {
+            // Usuario pendiente → mostrar pantalla de espera
+            await supabase.auth.signOut();
+            setPendingNombre(uData?.nombre || nombre || data.user.email?.split("@")[0] || "");
+            setErr("");
+            setOk("");
+            setPage("pending");
+            return;
+          }
+          
+          const rolFinalV = SUPERADMIN_EMAILS.includes(data.user.email)
+            ? "superadmin"
+            : (uData?.rol || "lectura");
+          onLogin(data.user, data.session, rolFinalV);
           return;
         }
       } catch (e) { lastErr = e.message; }
     }
+    blockAutoLogin.current = false;
     setErr(`Código incorrecto o expirado. ${lastErr}`);
     setLoading(false);
   }
@@ -350,7 +405,7 @@ function LoginPage({ onLogin }) {
     setLoading(true); reset();
     try {
       const { error } = await supabase.auth.resetPasswordForEmail(email, {
-        redirectTo: window.location.origin + "/?reset=true",
+        redirectTo: "https://noc-visor.multicable.hn/?reset=true",
       });
       if (error) throw error;
       setOk("Correo enviado. Revisa tu bandeja de entrada y sigue el enlace.");
@@ -441,6 +496,127 @@ function LoginPage({ onLogin }) {
           <LinkBtn onClick={reenviarOtp}>Reenviar código</LinkBtn>
           <LinkBtn onClick={() => { reset(); setPage("login"); }}>← Volver al login</LinkBtn>
         </form>
+      </div>
+    </div>
+  );
+
+  // ── Render Pendiente de aprobación ─────────────────────────────────────────
+  if (page === "pending") return (
+    <div style={authBg}>
+      <style>{`
+        @keyframes spin-ring {
+          from { transform: rotate(0deg); }
+          to   { transform: rotate(360deg); }
+        }
+        @keyframes float-dot {
+          0%, 100% { transform: translateY(0px); opacity: 1; }
+          50%       { transform: translateY(-6px); opacity: .4; }
+        }
+        @keyframes scan-line-anim {
+          0%   { top: 0%; opacity: .5; }
+          100% { top: 100%; opacity: 0; }
+        }
+        @keyframes glow-pulse {
+          0%, 100% { box-shadow: 0 0 20px rgba(0,194,224,.2); }
+          50%       { box-shadow: 0 0 40px rgba(0,194,224,.5), 0 0 80px rgba(0,194,224,.15); }
+        }
+      `}</style>
+      <div className="fade-in" style={{ ...authCard, textAlign: "center", padding: "48px 36px", position: "relative", overflow: "hidden" }}>
+        {/* Scanline */}
+        <div style={{
+          position: "absolute", left: 0, right: 0, height: 2,
+          background: "linear-gradient(90deg, transparent, rgba(0,194,224,.3), transparent)",
+          animation: "scan-line-anim 3s linear infinite",
+          pointerEvents: "none", zIndex: 0,
+        }} />
+
+        <AuthLogo />
+
+        {/* Animated rings */}
+        <div style={{ position: "relative", width: 96, height: 96, margin: "0 auto 28px", zIndex: 1 }}>
+          <div style={{
+            position: "absolute", inset: 0, borderRadius: "50%",
+            border: "2px solid transparent",
+            borderTopColor: "var(--accent)", borderRightColor: "var(--accent)",
+            animation: "spin-ring 1.8s linear infinite",
+          }} />
+          <div style={{
+            position: "absolute", inset: 10, borderRadius: "50%",
+            border: "2px solid transparent",
+            borderBottomColor: "var(--warn)", borderLeftColor: "var(--warn)",
+            animation: "spin-ring 2.4s linear infinite reverse",
+          }} />
+          <div style={{
+            position: "absolute", inset: 22, borderRadius: "50%",
+            background: "var(--panel2)", border: "1px solid var(--border)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            fontSize: 22, animation: "glow-pulse 2.5s ease infinite",
+          }}>
+            ⏳
+          </div>
+        </div>
+
+        {/* Title */}
+        <div style={{ fontFamily: "var(--mono)", fontSize: 13, color: "var(--accent)", letterSpacing: 3, marginBottom: 6, zIndex: 1, position: "relative" }}>
+          CUENTA EN REVISIÓN
+        </div>
+
+        {pendingNombre && (
+          <div style={{ fontWeight: 700, fontSize: 17, color: "var(--text)", marginBottom: 20, zIndex: 1, position: "relative" }}>
+            Hola, {pendingNombre} 👋
+          </div>
+        )}
+
+        {/* Info box */}
+        <div style={{
+          background: "rgba(0,194,224,.06)", border: "1px solid rgba(0,194,224,.2)",
+          borderRadius: 10, padding: "16px 18px", marginBottom: 20, textAlign: "left",
+          position: "relative", zIndex: 1,
+        }}>
+          <div style={{ fontSize: 13, color: "var(--text)", lineHeight: 1.8, marginBottom: 8 }}>
+            Tu cuenta fue creada y verificada. Un <strong style={{ color: "var(--accent)" }}>administrador</strong> debe aprobar tu acceso antes de que puedas ingresar al sistema.
+          </div>
+          <div style={{ fontSize: 12, color: "var(--sub)", lineHeight: 1.6 }}>
+            No es necesario hacer nada más. Recibirás acceso automáticamente una vez aprobado.
+          </div>
+        </div>
+
+        {/* Animated dots */}
+        <div style={{ display: "flex", justifyContent: "center", gap: 8, marginBottom: 20, zIndex: 1, position: "relative" }}>
+          {[0, 1, 2].map(i => (
+            <div key={i} style={{
+              width: 8, height: 8, borderRadius: "50%",
+              background: "var(--accent)",
+              animation: `float-dot 1.4s ease ${i * 0.22}s infinite`,
+            }} />
+          ))}
+        </div>
+
+        {/* Status badges */}
+        <div style={{ display: "flex", gap: 8, justifyContent: "center", marginBottom: 24, flexWrap: "wrap", zIndex: 1, position: "relative" }}>
+          {[["✅", "Email verificado", "var(--success)"], ["⏳", "Aprobación pendiente", "var(--warn)"], ["🔒", "Acceso restringido", "var(--sub)"]].map(([icon, label, color]) => (
+            <div key={label} style={{
+              display: "flex", alignItems: "center", gap: 5,
+              background: "var(--panel2)", border: "1px solid var(--border)",
+              borderRadius: 20, padding: "5px 13px",
+              fontSize: 11, color: color, fontFamily: "var(--mono)",
+            }}>
+              <span>{icon}</span><span>{label}</span>
+            </div>
+          ))}
+        </div>
+
+        <button
+          onClick={() => { setPage("login"); setErr(""); setOk(""); }}
+          style={{
+            background: "transparent", border: "1px solid var(--border)",
+            borderRadius: 8, color: "var(--sub)", cursor: "pointer",
+            fontSize: 12, padding: "9px 20px", fontFamily: "var(--sans)",
+            width: "100%", zIndex: 1, position: "relative",
+          }}
+        >
+          ← Volver al login
+        </button>
       </div>
     </div>
   );
@@ -618,7 +794,20 @@ function useNotificaciones() {
     }
   }
 
+  // ── Reproducir sonido ────────────────────────────────────────────────────────
+  function playSound(type) {
+    try {
+      const src = type === "down"
+        ? "https://isaacm10.github.io/noc-visor/down.wav"
+        : "https://isaacm10.github.io/noc-visor/up.wav";
+      const audio = new Audio(src);
+      audio.volume = 1.0;
+      audio.play().catch(() => {});
+    } catch (e) {}
+  }
+
   function notificarCaida(rutas) {
+    playSound("down");
     notificar(
       "🔴 ALERTA NOC — CAÍDA",
       `${rutas.length} caída${rutas.length > 1 ? "s" : ""} activa${rutas.length > 1 ? "s" : ""}:\n${rutas.join("\n")}`
@@ -626,6 +815,7 @@ function useNotificaciones() {
   }
 
   function notificarRecuperado(rutas) {
+    playSound("up");
     notificar(
       "✅ NOC — TRAMO RECUPERADO",
       `Restaurado:\n${rutas.join("\n")}`
@@ -778,7 +968,8 @@ function TabMonitoreo({ esAdmin }) {
         </div>
       ) : (
         <div style={S.tableWrap}>
-          <table style={S.table}>
+          {/* Desktop: tabla */}
+          <table style={{ ...S.table, display: "none" }} className="desktop-table">
             <thead>
               <tr>
                 {["ID", "Ruta / Tramo", "Nivel", "Desde", "Tiempo en curso", "Nº Hilo"].map(h => (
@@ -797,36 +988,57 @@ function TabMonitoreo({ esAdmin }) {
                     onMouseEnter={e => esAdmin && (e.currentTarget.style.background = "rgba(0,194,224,.06)")}
                     onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
                   >
-                    <td style={S.td(true)}>
-                      <span style={{ fontFamily: "var(--mono)", color: "var(--danger)" }}>#{f.n_registro}</span>
-                    </td>
+                    <td style={S.td(true)}><span style={{ fontFamily: "var(--mono)", color: "var(--danger)" }}>#{f.n_registro}</span></td>
                     <td style={{ ...S.td(true), textAlign: "left", fontWeight: 600 }}>{f.ruta_nombre}</td>
-                    <td style={S.td(true)}>
-                      <span style={S.badge("var(--danger)")}>{String(f.nivel_caido).replace(/\s*dBm/i,"").trim()} dBm</span>
-                    </td>
-                    <td style={{ ...S.td(true), fontFamily: "var(--mono)", fontSize: 11 }}>
-                      {fmtFecha(f.fecha_inicio_caida)}
-                    </td>
-                    <td style={{ ...S.td(true), color: "var(--warn)", fontFamily: "var(--mono)", fontSize: 12 }}>
-                      {f.tiempo_caida_texto || "—"}
-                    </td>
-                    <td style={S.td(true)}>
-                      {hilo != null
-                        ? <span style={S.badge("var(--accent)")}>{hilo}</span>
-                        : <span style={{ color: "var(--sub)" }}>—</span>}
-                    </td>
-                    {esAdmin && (
-                      <td style={S.td(true)}>
-                        <button style={S.btnSm("var(--warn)")} onClick={e => { e.stopPropagation(); setEditReg(f); }}>
-                          ✏ Editar
-                        </button>
-                      </td>
-                    )}
+                    <td style={S.td(true)}><span style={S.badge("var(--danger)")}>{String(f.nivel_caido).replace(/\s*dBm/i,"").trim()} dBm</span></td>
+                    <td style={{ ...S.td(true), fontFamily: "var(--mono)", fontSize: 11 }}>{fmtFecha(f.fecha_inicio_caida)}</td>
+                    <td style={{ ...S.td(true), color: "var(--warn)", fontFamily: "var(--mono)", fontSize: 12 }}>{f.tiempo_caida_texto || "—"}</td>
+                    <td style={S.td(true)}>{hilo != null ? <span style={S.badge("var(--accent)")}>{hilo}</span> : <span style={{ color: "var(--sub)" }}>—</span>}</td>
+                    {esAdmin && (<td style={S.td(true)}><button style={S.btnSm("var(--warn)")} onClick={e => { e.stopPropagation(); setEditReg(f); }}>✏ Editar</button></td>)}
                   </tr>
                 );
               })}
             </tbody>
           </table>
+
+          {/* Mobile: tarjetas */}
+          <div className="mobile-cards">
+            {filas.map(f => {
+              const hilo = hiloCache.current[f.n_registro] ?? f.Numero_Hilo;
+              return (
+                <div key={f.n_registro}
+                  onClick={esAdmin ? () => setEditReg(f) : undefined}
+                  style={{
+                    padding: "14px 16px",
+                    borderBottom: "1px solid var(--border)",
+                    background: "rgba(255,61,61,.03)",
+                    cursor: esAdmin ? "pointer" : "default",
+                  }}
+                >
+                  {/* Fila 1: ID + Ruta */}
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                    <span style={{ fontFamily: "var(--mono)", color: "var(--danger)", fontSize: 12, flexShrink: 0 }}>#{f.n_registro}</span>
+                    <span style={{ fontWeight: 700, fontSize: 13, color: "var(--text)", lineHeight: 1.3 }}>{f.ruta_nombre}</span>
+                  </div>
+                  {/* Fila 2: Nivel + Tiempo */}
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
+                    <span style={S.badge("var(--danger)")}>{String(f.nivel_caido).replace(/\s*dBm/i,"").trim()} dBm</span>
+                    <span style={{ ...S.badge("var(--warn)"), fontFamily: "var(--mono)" }}>{f.tiempo_caida_texto || "—"}</span>
+                    {hilo != null && <span style={S.badge("var(--accent)")}>Hilo {hilo}</span>}
+                  </div>
+                  {/* Fila 3: Fecha */}
+                  <div style={{ fontSize: 11, color: "var(--sub)", fontFamily: "var(--mono)" }}>
+                    Desde: {fmtFecha(f.fecha_inicio_caida)}
+                  </div>
+                  {esAdmin && (
+                    <div style={{ marginTop: 8 }}>
+                      <button style={S.btnSm("var(--warn)")} onClick={e => { e.stopPropagation(); setEditReg(f); }}>✏ Editar Hilo</button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 
@@ -949,30 +1161,67 @@ function TabHistorial() {
 }
 
 // ─── TAB: USUARIOS (solo admin) ───────────────────────────────────────────────
-function TabUsuarios({ currentUserId }) {
+function TabUsuarios({ currentUserId, currentUserEmail, esSuperAdmin }) {
   const [users, setUsers]   = useState([]);
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState({ msg: "", ok: true });
+  const prevPendientes = useRef(0);
 
-  async function cargar() {
-    setLoading(true);
+  async function cargar(silencioso = false) {
+    if (!silencioso) setLoading(true);
     const { data } = await supabase.from("usuarios").select("*").order("creado_en", { ascending: false });
-    setUsers(data || []);
-    setLoading(false);
+    const lista = data || [];
+    setUsers(lista);
+    if (!silencioso) setLoading(false);
+
+    // Notificar si llegó un nuevo pendiente
+    const nuevos = lista.filter(u => u.rol === "pendiente").length;
+    if (nuevos > prevPendientes.current && prevPendientes.current >= 0) {
+      if (nuevos > prevPendientes.current) {
+        // Sonido / título de pestaña para alertar
+        document.title = `🔔 (${nuevos}) Usuario pendiente — NOC VISOR`;
+        setTimeout(() => { document.title = "NOC VISOR"; }, 8000);
+      }
+    }
+    prevPendientes.current = nuevos;
   }
 
-  useEffect(() => { cargar(); }, []);
+  useEffect(() => {
+    cargar();
+    // Auto-refresco cada 15 segundos para detectar nuevos registros
+    const iv = setInterval(() => cargar(true), 15000);
+    return () => clearInterval(iv);
+  }, []);
 
-  async function cambiarRol(uid, email, nuevoRol) {
-    if (uid === currentUserId && nuevoRol !== "admin") {
-      setStatus({ msg: "⚠ No puedes quitarte el rol admin a ti mismo.", ok: false }); return;
+  async function cambiarRol(uid, userEmail, nuevoRol) {
+    // Superadmins no pueden ser degradados por nadie
+    if (SUPERADMIN_EMAILS.includes(userEmail) && nuevoRol !== "superadmin") {
+      setStatus({ msg: "⛔ Los superadmins no pueden ser degradados.", ok: false }); return;
     }
-    const { error } = await supabase.from("usuarios").update({ rol: nuevoRol }).eq("id", uid);
+    // Solo superadmin puede asignar rol superadmin
+    if (nuevoRol === "superadmin" && !esSuperAdmin) {
+      setStatus({ msg: "⛔ Solo un superadmin puede asignar ese rol.", ok: false }); return;
+    }
+    // Admins normales no pueden degradar a otros admins ni a sí mismos
+    if (!esSuperAdmin) {
+      const target = users.find(u => u.id === uid);
+      if (target && target.rol === "admin" && nuevoRol !== "admin") {
+        setStatus({ msg: "⛔ No puedes cambiar el rol de otro administrador.", ok: false }); return;
+      }
+      if (uid === currentUserId && nuevoRol !== "admin") {
+        setStatus({ msg: "⛔ No puedes quitarte el rol de administrador.", ok: false }); return;
+      }
+    }
+    const rolReal = SUPERADMIN_EMAILS.includes(userEmail) ? "superadmin" : nuevoRol;
+    const { error } = await supabase.from("usuarios").update({ rol: rolReal === "superadmin" ? "admin" : rolReal }).eq("id", uid);
     if (error) { setStatus({ msg: `Error: ${error.message}`, ok: false }); return; }
-    setStatus({ msg: `✔ Rol de ${email} actualizado a '${nuevoRol}'`, ok: true });
-    setUsers(prev => prev.map(u => u.id === uid ? { ...u, rol: nuevoRol } : u));
+    setStatus({ msg: `✔ Rol de ${userEmail} actualizado a '${rolReal}'`, ok: true });
+    setUsers(prev => prev.map(u => u.id === uid ? { ...u, rol: rolReal === "superadmin" ? "admin" : rolReal } : u));
     setTimeout(() => setStatus({ msg: "", ok: true }), 3000);
   }
+
+  const pendientes = users.filter(u => u.rol === "pendiente");
+  const activos = users.filter(u => u.rol !== "pendiente");
 
   return (
     <div className="fade-in">
@@ -991,6 +1240,82 @@ function TabUsuarios({ currentUserId }) {
         </div>
       )}
 
+      {/* ── Usuarios pendientes de aprobación ── */}
+      {pendientes.length > 0 && (
+        <div style={{ marginBottom: 24 }}>
+          {/* Banner alerta */}
+          <div style={{
+            background: "rgba(240,165,0,.10)", border: "1px solid rgba(240,165,0,.5)",
+            borderRadius: 10, padding: "12px 16px", marginBottom: 12,
+            display: "flex", alignItems: "center", gap: 12,
+            boxShadow: "0 0 18px rgba(240,165,0,.15)",
+          }}>
+            <span style={{ fontSize: 22 }}>🔔</span>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--warn)", letterSpacing: 2, fontWeight: 700 }}>
+                SOLICITUDES DE ACCESO PENDIENTES
+              </div>
+              <div style={{ fontSize: 12, color: "var(--sub)", marginTop: 2 }}>
+                {pendientes.length} usuario{pendientes.length > 1 ? "s" : ""} esperando aprobación para entrar al sistema
+              </div>
+            </div>
+            <span style={{ ...S.badge("var(--warn)"), fontSize: 14, padding: "4px 14px" }}>{pendientes.length}</span>
+          </div>
+
+          {pendientes.map(u => (
+            <div key={u.id} style={{
+              background: "rgba(240,165,0,.05)", border: "1px solid rgba(240,165,0,.3)",
+              borderRadius: 10, padding: "14px 18px", marginBottom: 10,
+              display: "flex", alignItems: "center", justifyContent: "space-between",
+              flexWrap: "wrap", gap: 12, animation: "fadeIn .3s ease",
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <div style={{
+                  width: 42, height: 42, borderRadius: "50%",
+                  background: "rgba(240,165,0,.2)", border: "2px solid rgba(240,165,0,.4)",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  fontFamily: "var(--mono)", fontSize: 16, color: "var(--warn)", fontWeight: 700, flexShrink: 0,
+                }}>
+                  {(u.nombre || u.email || "?")[0].toUpperCase()}
+                </div>
+                <div>
+                  <div style={{ fontWeight: 700, fontSize: 14, color: "var(--text)" }}>{u.nombre || "Sin nombre"}</div>
+                  <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--sub)", marginTop: 2 }}>{u.email}</div>
+                  <div style={{ fontSize: 10, color: "var(--sub)", marginTop: 3 }}>Registrado: {fmtFecha(u.creado_en)}</div>
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 10 }}>
+                <button
+                  onClick={() => cambiarRol(u.id, u.email, "lectura")}
+                  style={{
+                    padding: "9px 20px", borderRadius: 8, fontSize: 13, fontWeight: 700,
+                    fontFamily: "var(--sans)", cursor: "pointer",
+                    border: "1px solid var(--success)", background: "rgba(0,230,118,.15)", color: "var(--success)",
+                  }}>
+                  ✅ Aprobar acceso
+                </button>
+                <button
+                  onClick={async () => {
+                    if (!confirm(`¿Rechazar y eliminar a ${u.nombre || u.email}?\nEsta acción no se puede deshacer.`)) return;
+                    await supabase.from("usuarios").delete().eq("id", u.id);
+                    await supabase.auth.admin?.deleteUser?.(u.id).catch(() => {});
+                    setUsers(prev => prev.filter(x => x.id !== u.id));
+                    setStatus({ msg: `✔ Acceso rechazado para ${u.email}.`, ok: true });
+                    setTimeout(() => setStatus({ msg: "", ok: true }), 3000);
+                  }}
+                  style={{
+                    padding: "9px 20px", borderRadius: 8, fontSize: 13, fontWeight: 700,
+                    fontFamily: "var(--sans)", cursor: "pointer",
+                    border: "1px solid var(--danger)", background: "rgba(255,61,61,.1)", color: "var(--danger)",
+                  }}>
+                  ❌ Rechazar
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       {loading ? (
         <div style={{ textAlign: "center", padding: 40, color: "var(--sub)" }}>Cargando usuarios...</div>
       ) : (
@@ -1006,7 +1331,7 @@ function TabUsuarios({ currentUserId }) {
                 </tr>
               </thead>
               <tbody>
-                {users.map(u => (
+                {activos.map(u => (
                   <tr key={u.id}
                     onMouseEnter={e => e.currentTarget.style.background = "rgba(255,255,255,.02)"}
                     onMouseLeave={e => e.currentTarget.style.background = "transparent"}
@@ -1014,39 +1339,70 @@ function TabUsuarios({ currentUserId }) {
                     <td style={S.td()}>{u.nombre || "—"}</td>
                     <td style={{ ...S.td(), fontFamily: "var(--mono)", fontSize: 12 }}>{u.email}</td>
                     <td style={S.td()}>
-                      <span style={S.badge(u.rol === "admin" ? "var(--warn)" : "var(--sub)")}>
-                        {u.rol === "admin" ? "Admin" : "Lectura"}
+                      <span style={S.badge(
+                        SUPERADMIN_EMAILS.includes(u.email) ? "#C084FC" :
+                        u.rol === "admin" ? "var(--warn)" :
+                        u.rol === "pendiente" ? "#F0A500" :
+                        "var(--sub)"
+                      )}>
+                        {SUPERADMIN_EMAILS.includes(u.email) ? "⭐ Superadmin" :
+                         u.rol === "admin" ? "Admin" :
+                         u.rol === "pendiente" ? "⏳ Pendiente" : "Lectura"}
                       </span>
                     </td>
                     <td style={{ ...S.td(), fontFamily: "var(--mono)", fontSize: 11 }}>{fmtFecha(u.creado_en)}</td>
                     <td style={S.td()}>
-                      <div style={{ display: "flex", gap: 6, justifyContent: "center" }}>
-                        <button
-                          disabled={u.rol === "admin"}
-                          onClick={() => cambiarRol(u.id, u.email, "admin")}
-                          style={{
-                            padding: "5px 14px", borderRadius: 6, fontSize: 12, fontWeight: 700,
-                            fontFamily: "var(--sans)", cursor: u.rol === "admin" ? "default" : "pointer",
-                            border: "1px solid var(--warn)",
-                            background: u.rol === "admin" ? "var(--warn)" : "transparent",
-                            color: u.rol === "admin" ? "var(--bg)" : "var(--warn)",
-                            opacity: 1,
-                          }}>
-                          Admin
-                        </button>
-                        <button
-                          disabled={u.rol === "lectura"}
-                          onClick={() => cambiarRol(u.id, u.email, "lectura")}
-                          style={{
-                            padding: "5px 14px", borderRadius: 6, fontSize: 12, fontWeight: 700,
-                            fontFamily: "var(--sans)", cursor: u.rol === "lectura" ? "default" : "pointer",
-                            border: "1px solid var(--accent)",
-                            background: u.rol === "lectura" ? "var(--accent)" : "transparent",
-                            color: u.rol === "lectura" ? "var(--bg)" : "var(--accent)",
-                            opacity: 1,
-                          }}>
-                          Lectura
-                        </button>
+                      <div style={{ display: "flex", gap: 6, justifyContent: "center", flexWrap: "wrap" }}>
+                        {SUPERADMIN_EMAILS.includes(u.email) ? (
+                          /* Superadmin: intocable */
+                          <span style={{ fontSize: 11, color: "#C084FC", fontFamily: "var(--mono)", padding: "5px 8px" }}>
+                            ⭐ Protegido
+                          </span>
+                        ) : (!esSuperAdmin && u.rol === "admin") ? (
+                          /* Admin normal viendo a otro admin: solo lectura */
+                          <span style={{ fontSize: 11, color: "var(--sub)", fontFamily: "var(--mono)", padding: "5px 8px" }}>
+                            🔒 Admin protegido
+                          </span>
+                        ) : (
+                          <>
+                            {esSuperAdmin && (
+                              <button
+                                onClick={() => cambiarRol(u.id, u.email, "superadmin")}
+                                style={{
+                                  padding: "5px 10px", borderRadius: 6, fontSize: 11, fontWeight: 700,
+                                  fontFamily: "var(--sans)", cursor: "pointer",
+                                  border: "1px solid #C084FC",
+                                  background: "transparent", color: "#C084FC",
+                                }}>
+                                ⭐ Super
+                              </button>
+                            )}
+                            <button
+                              disabled={u.rol === "admin"}
+                              onClick={() => cambiarRol(u.id, u.email, "admin")}
+                              style={{
+                                padding: "5px 14px", borderRadius: 6, fontSize: 12, fontWeight: 700,
+                                fontFamily: "var(--sans)", cursor: u.rol === "admin" ? "default" : "pointer",
+                                border: "1px solid var(--warn)",
+                                background: u.rol === "admin" ? "var(--warn)" : "transparent",
+                                color: u.rol === "admin" ? "var(--bg)" : "var(--warn)",
+                              }}>
+                              Admin
+                            </button>
+                            <button
+                              disabled={u.rol === "lectura"}
+                              onClick={() => cambiarRol(u.id, u.email, "lectura")}
+                              style={{
+                                padding: "5px 14px", borderRadius: 6, fontSize: 12, fontWeight: 700,
+                                fontFamily: "var(--sans)", cursor: u.rol === "lectura" ? "default" : "pointer",
+                                border: "1px solid var(--accent)",
+                                background: u.rol === "lectura" ? "var(--accent)" : "transparent",
+                                color: u.rol === "lectura" ? "var(--bg)" : "var(--accent)",
+                              }}>
+                              Lectura
+                            </button>
+                          </>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -1127,9 +1483,46 @@ export default function App() {
   const [rol, setRol]               = useState("lectura");
   const [tab, setTab]               = useState("monitoreo");
   const [mobileMenu, setMobileMenu] = useState(false);
-  const [resetMode, setResetMode]   = useState(false); // true cuando viene del enlace de correo
+  const [resetMode, setResetMode]   = useState(false);
   const [showApk, setShowApk]       = useState(false);
-  const esAppNativa = typeof window !== "undefined" && window.Capacitor?.isNativePlatform?.() === true;
+  const [updateBanner, setUpdateBanner] = useState(false);
+  const [pendientesCount, setPendientesCount] = useState(0);
+  const esAppNativa = typeof window !== "undefined" && (
+    window.Capacitor?.isNativePlatform?.() === true ||
+    window.Capacitor?.getPlatform?.() === "android" ||
+    window.Capacitor?.getPlatform?.() === "ios"
+  );
+
+  // Limpiar caché automáticamente en APK nativa al abrir
+  useEffect(() => {
+    if (!esAppNativa) return;
+    if ("caches" in window) {
+      caches.keys().then(names => {
+        names.forEach(name => caches.delete(name));
+      });
+    }
+  }, [esAppNativa]);
+  useEffect(() => {
+    if (!esAppNativa) return;
+    let lastCheck = Date.now();
+
+    function handleFocus() {
+      const now = Date.now();
+      // Si pasaron más de 30 segundos fuera, mostrar "Verificando actualización..."
+      if (now - lastCheck > 30000) {
+        setUpdateBanner("checking");
+        setTimeout(() => setUpdateBanner(false), 3000);
+      }
+      lastCheck = now;
+    }
+
+    window.addEventListener("focus", handleFocus);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") handleFocus();
+    });
+
+    return () => window.removeEventListener("focus", handleFocus);
+  }, [esAppNativa]);
 
   useEffect(() => {
     injectCSS(GLOBAL_CSS);
@@ -1139,18 +1532,38 @@ export default function App() {
       if (data.session) {
         const { data: uData } = await supabase.from("usuarios")
           .select("rol").eq("id", data.session.user.id).single();
+        // No restaurar sesión si el rol es pendiente
+        if (!uData || uData.rol === "pendiente") {
+          await supabase.auth.signOut();
+          return;
+        }
+        const rolSesion = SUPERADMIN_EMAILS.includes(data.session.user.email)
+          ? "superadmin"
+          : (uData?.rol || "lectura");
         setUser(data.session.user);
         setSession(data.session);
-        setRol(uData?.rol || "lectura");
+        setRol(rolSesion);
       }
     });
 
-    // Escuchar evento PASSWORD_RECOVERY (cuando el usuario viene del enlace del correo)
-    const { data: listener } = supabase.auth.onAuthStateChange((event, session) => {
+    // Escuchar eventos de autenticación
+    const { data: listener } = supabase.auth.onAuthStateChange(async (event, session) => {
       if (event === "PASSWORD_RECOVERY") {
         setResetMode(true);
         setUser(session?.user || null);
         setSession(session);
+      }
+      // Si hay un SIGNED_IN, verificar siempre el rol antes de permitir acceso
+      if (event === "SIGNED_IN" && session?.user) {
+        const { data: uData } = await supabase.from("usuarios")
+          .select("rol").eq("id", session.user.id).single();
+        if (!uData || uData.rol === "pendiente") {
+          // Cerrar sesión — la LoginPage mostrará la pantalla de espera
+          await supabase.auth.signOut();
+          return;
+        }
+        // Solo actualizar estado si viene de un flujo legítimo (no OTP gestionado por LoginPage)
+        // handleLogin() en LoginPage llama onLogin() directamente, esto cubre otros casos
       }
     });
 
@@ -1158,6 +1571,19 @@ export default function App() {
   }, []);
 
   function handleLogin(u, s, r) { setUser(u); setSession(s); setRol(r); }
+
+  // Polling de pendientes para badge en sidebar (solo admins)
+  useEffect(() => {
+    if (!user || rol !== "admin") return;
+    async function checkPendientes() {
+      const { count } = await supabase.from("usuarios")
+        .select("*", { count: "exact", head: true }).eq("rol", "pendiente");
+      setPendientesCount(count || 0);
+    }
+    checkPendientes();
+    const iv = setInterval(checkPendientes, 15000);
+    return () => clearInterval(iv);
+  }, [user, rol]);
 
   async function handleLogout() {
     await supabase.auth.signOut();
@@ -1175,8 +1601,9 @@ export default function App() {
 
   if (!user) return <LoginPage onLogin={handleLogin} />;
 
-  const esAdmin = rol === "admin";
-  const tabs    = esAdmin ? TABS_ADMIN : TABS;
+  const esAdmin      = rol === "admin" || rol === "superadmin";
+  const esSuperAdmin = rol === "superadmin";
+  const tabs         = esAdmin ? TABS_ADMIN : TABS;
   const userName = user.user_metadata?.full_name || user.email;
 
   return (
@@ -1190,8 +1617,7 @@ export default function App() {
             color: "var(--accent)", fontSize: 20, display: "none",
           }} className="hamburger">☰</button>
           <div>
-            <div style={S.topbarTitle}>NOC VISOR</div>
-            <div style={S.topbarSub}>DWDM MONITORING</div>
+            <div style={{ fontFamily: "var(--mono)", color: "var(--accent)", fontSize: 20, letterSpacing: 4 }}>NOC VISOR</div>
           </div>
         </div>
 
@@ -1199,14 +1625,32 @@ export default function App() {
           <LiveDot color="var(--success)" />
           <div style={{ textAlign: "right" }}>
             <div style={{ fontSize: 12, color: "var(--text)" }}>{userName}</div>
-            <span style={S.badge(esAdmin ? "var(--warn)" : "var(--sub)")}>
-              {esAdmin ? "⚙ Admin" : "👁 Lectura"}
+            <span style={S.badge(
+              esSuperAdmin ? "#C084FC" :
+              esAdmin      ? "var(--warn)" :
+                             "var(--sub)"
+            )}>
+              {esSuperAdmin ? "⭐ Superadmin" : esAdmin ? "⚙ Admin" : "👁 Lectura"}
             </span>
           </div>
           <button style={{ ...S.btn("var(--danger)", "white"), padding: "6px 14px", fontSize: 12 }}
             onClick={handleLogout}>Salir</button>
         </div>
       </div>
+
+      {/* Banner de actualización */}
+      {updateBanner === "checking" && (
+        <div style={{
+          background: "linear-gradient(90deg, #00C2E022, #00C2E011)",
+          borderBottom: "1px solid #00C2E033",
+          padding: "6px 20px",
+          display: "flex", alignItems: "center", gap: 8,
+          fontFamily: "var(--mono)", fontSize: 11, color: "var(--accent)",
+        }}>
+          <LiveDot color="var(--accent)" />
+          Verificando contenido actualizado...
+        </div>
+      )}
 
       <div style={S.main}>
         {/* Sidebar */}
@@ -1219,7 +1663,15 @@ export default function App() {
               <div key={t.id} style={S.navItem(tab === t.id)}
                 onClick={() => { setTab(t.id); setMobileMenu(false); }}>
                 <span style={{ fontSize: 16 }}>{t.icon}</span>
-                <span>{t.label.split(" ").slice(1).join(" ")}</span>
+                <span style={{ flex: 1 }}>{t.label.split(" ").slice(1).join(" ")}</span>
+                {t.id === "usuarios" && pendientesCount > 0 && (
+                  <span style={{
+                    background: "var(--warn)", color: "var(--bg)",
+                    borderRadius: 10, fontSize: 10, fontWeight: 700,
+                    padding: "1px 7px", minWidth: 18, textAlign: "center",
+                    animation: "pulse-dot 1.5s infinite",
+                  }}>{pendientesCount}</span>
+                )}
               </div>
             ))}
           </div>
@@ -1229,6 +1681,40 @@ export default function App() {
             <div style={{ fontSize: 10, color: "var(--sub)", fontFamily: "var(--mono)", lineHeight: 1.8 }}>
               <div>SISTEMA DWDM</div>
               <div>{esAppNativa ? "v2.0 — Android App" : "v2.0 — Web App"}</div>
+              <div style={{ fontSize: 9, color: "var(--sub)", marginTop: 2 }}>
+                Actualizado: {new Date(__BUILD_DATE__).toLocaleString("es-HN", { timeZone: "America/Tegucigalpa", day:"2-digit", month:"2-digit", year:"numeric", hour:"2-digit", minute:"2-digit" })}
+              </div>
+              <div style={{ fontSize: 9, color: "var(--sub)", marginTop: 6, lineHeight: 1.6, borderTop: "1px solid var(--border)", paddingTop: 6 }}>
+                © 2026 Isaac Yasuri Delcid Mendoza<br/>Todos los derechos reservados
+              </div>
+              {esAppNativa && (
+                <button
+                  onClick={() => {
+                    if ("caches" in window) {
+                      caches.keys().then(names => {
+                        Promise.all(names.map(n => caches.delete(n))).then(() => {
+                          window.location.reload(true);
+                        });
+                      });
+                    } else {
+                      window.location.reload(true);
+                    }
+                  }}
+                  style={{
+                    marginTop: 10, width: "100%",
+                    padding: "8px 0", borderRadius: 8,
+                    background: "linear-gradient(135deg, #00C2E011, #00C2E022)",
+                    border: "1px solid #00C2E044",
+                    color: "var(--accent)", fontSize: 11,
+                    fontWeight: 700, fontFamily: "var(--sans)",
+                    cursor: "pointer", letterSpacing: 0.5,
+                    display: "flex", alignItems: "center",
+                    justifyContent: "center", gap: 6,
+                  }}
+                >
+                  🔄 Actualizar App
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -1270,7 +1756,7 @@ export default function App() {
 
           {tab === "monitoreo" && <TabMonitoreo esAdmin={esAdmin} />}
           {tab === "historial" && <TabHistorial />}
-          {tab === "usuarios"  && esAdmin && <TabUsuarios currentUserId={user.id} />}
+          {tab === "usuarios"  && esAdmin && <TabUsuarios currentUserId={user.id} currentUserEmail={user.email} esSuperAdmin={esSuperAdmin} />}
         </div>
       </div>
 
@@ -1350,7 +1836,7 @@ export default function App() {
 
               {/* Download button */}
               <a
-                href="https://uazaihdhpderwqmhglni.supabase.co/storage/v1/object/public/apk/noc-visor.apk"
+                href="https://github.com/isaacm10/noc-visor/releases/download/v2.0/noc-visor.apk"
                 download="noc-visor.apk"
                 style={{
                   display: "flex", alignItems: "center", justifyContent: "center", gap: 10,
@@ -1382,7 +1868,14 @@ export default function App() {
             z-index: 300; transform: translateX(-100%);
             transition: transform .3s;
           }
+          .desktop-table { display: none !important; }
+          .mobile-cards { display: block !important; }
         }
+        @media (min-width: 769px) {
+          .desktop-table { display: table !important; }
+          .mobile-cards { display: none !important; }
+        }
+        .mobile-cards { display: none; }
       `}</style>
     </div>
   );

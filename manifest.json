@@ -1,0 +1,19 @@
+{
+  "name": "NOC Visor",
+  "short_name": "NOC Visor",
+  "description": "Sistema de monitoreo DWDM",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#080B12",
+  "theme_color": "#00C2E0",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

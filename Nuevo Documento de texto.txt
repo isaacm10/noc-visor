@@ -1,0 +1,8 @@
+Mi proyecto es NOC Visor - Sistema de monitoreo DWDM.
+- Web: https://noc-visor.multicable.hn
+- GitHub: https://github.com/isaacm10/noc-visor
+- Supabase: https://uazaihdhpderwqmhglni.supabase.co
+- Stack: React + Vite + Capacitor + Electron + Supabase
+- Archivos principales: src/App.jsx, electron-main.js, capacitor.config.json
+- Actualizar web: npm run deploy
+- Actualizar APK+EXE: actualizar-todo.bat
