@@ -1715,6 +1715,25 @@ export default function App() {
                   🔄 Actualizar App
                 </button>
               )}
+              {!esAppNativa && !/Mobi|Android/i.test(navigator.userAgent) && (
+                <a
+                  href="https://github.com/isaacm10/noc-visor/releases/download/v2.0/NOC.Visor.v2.0.exe"
+                  style={{
+                    marginTop: 10, width: "100%",
+                    padding: "8px 0", borderRadius: 8,
+                    background: "linear-gradient(135deg, #00C2E011, #00C2E022)",
+                    border: "1px solid #00C2E044",
+                    color: "var(--accent)", fontSize: 11,
+                    fontWeight: 700, fontFamily: "var(--sans)",
+                    cursor: "pointer", letterSpacing: 0.5,
+                    display: "flex", alignItems: "center",
+                    justifyContent: "center", gap: 6,
+                    textDecoration: "none",
+                  }}
+                >
+                  ⬇ Descargar App .exe
+                </a>
+              )}
             </div>
           </div>
         </div>
