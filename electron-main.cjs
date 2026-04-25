@@ -16,7 +16,7 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
-      preload: path.join(__dirname, "electron-preload.js"),
+      preload: path.join(__dirname, "electron-preload.cjs"),
     },
     backgroundColor: "#080B12",
     show: false,

@@ -1717,7 +1717,7 @@ export default function App() {
               )}
               {!esAppNativa && !/Mobi|Android/i.test(navigator.userAgent) && (
                 <a
-                  href="https://github.com/isaacm10/noc-visor/releases/download/v2.0/NOC.Visor.2.0.0.exe"
+                  href="https://github.com/isaacm10/noc-visor/releases/download/v2.0/NOC.Visor.exe"
                   style={{
                     marginTop: 10, width: "100%",
                     padding: "8px 0", borderRadius: 8,
