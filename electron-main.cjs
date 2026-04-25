@@ -3,7 +3,6 @@ const path = require("path");
 
 let win = null;
 let tray = null;
-const APP_URL = "https://noc-visor.multicable.hn";
 
 function createWindow() {
   win = new BrowserWindow({
@@ -17,12 +16,13 @@ function createWindow() {
       nodeIntegration: false,
       contextIsolation: true,
       preload: path.join(__dirname, "electron-preload.cjs"),
+      webSecurity: false,
     },
     backgroundColor: "#080B12",
     show: false,
   });
 
-  win.loadURL(APP_URL);
+  win.loadFile(path.join(__dirname, "dist", "index.html"));
   win.once("ready-to-show", () => win.show());
 
   win.on("close", (e) => {
